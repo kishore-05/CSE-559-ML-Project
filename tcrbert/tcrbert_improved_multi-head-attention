@@ -1,0 +1,99 @@
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+import pandas as pd
+from transformers import BertTokenizer, BertModel, AdamW, get_linear_schedule_with_warmup
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+
+# Define a custom model incorporating multi-headed attention
+class TCRBertWithAttention(nn.Module):
+    def __init__(self, num_labels=2):
+        super(TCRBertWithAttention, self).__init__()
+        self.bert = BertModel.from_pretrained('Rostlab/prot_bert_bfd')
+        self.attention = nn.MultiheadAttention(embed_dim=768, num_heads=12)  # 768 is the size of BERT hidden layers
+        self.classifier = nn.Linear(768, num_labels)
+
+    def forward(self, input_ids, attention_mask=None):
+        outputs = self.bert(input_ids, attention_mask=attention_mask)
+        last_hidden_state = outputs.last_hidden_state
+        attention_output, _ = self.attention(last_hidden_state, last_hidden_state, last_hidden_state)
+        pooled_output = attention_output.mean(dim=1)
+        logits = self.classifier(pooled_output)
+        return logits
+
+# Data loading and processing remain similar
+def load_and_preprocess_data(file_path):
+    df = pd.read_csv(file_path, header=None)
+    df.columns = ['tcr_sequence', 'binding', 'label']
+    return df[['tcr_sequence', 'label']].dropna()
+
+def tokenize_data(tokenizer, data, max_length=128):
+    return tokenizer(data['tcr_sequence'].tolist(), truncation=True, padding='max_length', max_length=max_length, return_tensors="pt")
+
+class TCRDataset(Dataset):
+    def __init__(self, encodings, labels):
+        self.encodings = encodings
+        self.labels = labels
+
+    def __getitem__(self, idx):
+        item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
+        item['labels'] = torch.tensor(self.labels[idx], dtype=torch.long)
+        return item
+
+    def __len__(self):
+        return len(self.labels)
+
+# Model training
+def train_model(model, train_loader, device, learning_rate=2e-5, epochs=3):
+    model.to(device)
+    optimizer = AdamW(model.parameters(), lr=learning_rate)
+    for epoch in range(epochs):
+        model.train()
+        for batch in train_loader:
+            optimizer.zero_grad()
+            input_ids = batch['input_ids'].to(device)
+            labels = batch['labels'].to(device)
+            outputs = model(input_ids)
+            loss_fn = nn.CrossEntropyLoss()
+            loss = loss_fn(outputs, labels)
+            loss.backward()
+            optimizer.step()
+        print(f'Epoch {epoch + 1}: Loss {loss.item()}')
+
+
+def evaluate_model(model, data_loader, device):
+    model.eval()
+    predictions, actuals = [], []
+    with torch.no_grad():
+        for batch in data_loader:
+            input_ids = batch['input_ids'].to(device)
+            labels = batch['labels'].to(device)
+            outputs = model(input_ids)
+            preds = torch.argmax(outputs, dim=1)
+            predictions.extend(preds.tolist())
+            actuals.extend(labels.tolist())
+
+    accuracy = accuracy_score(actuals, predictions)
+    precision, recall, f1 = precision_recall_fscore_support(actuals, predictions, average='binary')
+    print(f"Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}")
+
+# Main execution
+if __name__ == "__main__":
+    tokenizer = BertTokenizer.from_pretrained('Rostlab/prot_bert_bfd')
+    train_df = load_and_preprocess_data('train.csv')
+    train_encodings = tokenize_data(tokenizer, train_df)
+    train_labels = train_df['label'].values
+    train_dataset = TCRDataset(train_encodings, train_labels)
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+
+    model = TCRBertWithAttention(num_labels=2)
+    train_model(model, train_loader, torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+    # Assuming test_df is loaded and preprocessed similarly to train_df
+    test_df = load_and_preprocess_data('test.csv')
+    test_encodings = tokenize_data(tokenizer, test_df)
+    test_labels = test_df['label'].values
+    test_dataset = TCRDataset(test_encodings, test_labels)
+    test_loader = DataLoader(test_dataset, batch_size=8)
+
+    # Evaluate the model after training
+    evaluate_model(model, test_loader, torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
