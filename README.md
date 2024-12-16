@@ -1,2 +1,2 @@
 # CSE-559-ML-Project
-This repo contains the comparison of TCRGP and TCRBERT models
+This repo evaluates the performance of the TCRGP and TCRBERT models.
